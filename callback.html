@@ -11,105 +11,96 @@
       display: flex; align-items: center; justify-content: center;
       min-height: 100vh; background: #121212; color: #fff;
     }
-    .card {
-      text-align: center; padding: 40px 32px; max-width: 420px; width: 90%;
+    .card { text-align: center; padding: 40px 28px; max-width: 400px; width: 90%; }
+    .icon { font-size: 3.5rem; margin-bottom: 20px; }
+    h1 { font-size: 1.4rem; margin-bottom: 12px; }
+    .sub { font-size: 0.88rem; opacity: 0.6; line-height: 1.7; margin-bottom: 28px; }
+    .hint {
+      font-size: 0.82rem; background: #1e1e1e; border-radius: 8px;
+      padding: 12px 16px; line-height: 1.8; opacity: 0.75; margin-bottom: 20px;
     }
-    .icon { font-size: 3rem; margin-bottom: 16px; }
-    h1 { font-size: 1.3rem; margin-bottom: 8px; }
-    p { font-size: 0.9rem; opacity: 0.65; line-height: 1.6; margin-bottom: 24px; }
-    .btn {
-      display: inline-block; padding: 12px 28px; border-radius: 8px; border: none;
-      font-size: 0.95rem; font-weight: 600; cursor: pointer;
-      background: #1db954; color: #000; transition: opacity .15s;
-    }
-    .btn:hover { opacity: 0.85; }
-    .btn:active { opacity: 0.7; }
+    .hint strong { opacity: 1; color: #1db954; }
     .error { color: #ff6b6b; }
   </style>
 </head>
 <body>
-  <div class="card" id="card">
-    <div class="icon">⏳</div>
+  <div class="card">
+    <div class="icon" id="icon">⏳</div>
     <h1 id="title">Spotify 認証中...</h1>
-    <p id="msg"></p>
+    <p class="sub" id="sub"></p>
+    <div class="hint" id="hint" style="display:none"></div>
   </div>
 
   <script>
+    const iconEl  = document.getElementById('icon')
     const titleEl = document.getElementById('title')
-    const msgEl   = document.getElementById('msg')
-    const cardEl  = document.getElementById('card')
+    const subEl   = document.getElementById('sub')
+    const hintEl  = document.getElementById('hint')
 
-    function showSuccess() {
-      titleEl.textContent = '認証完了！'
-      msgEl.textContent   = 'Even Hub のアプリに認証情報を送信しました。このウィンドウを閉じて Even Hub に戻ってください。'
-      cardEl.querySelector('.icon').textContent = '✅'
+    const search   = window.location.search
+    const usp      = new URLSearchParams(search)
+    const code     = usp.get('code')
+    const error    = usp.get('error')
+    const stateVal = usp.get('state') ?? ''
 
-      // 閉じるボタン
-      const btn = document.createElement('button')
-      btn.className   = 'btn'
-      btn.textContent = 'このウィンドウを閉じる'
-      btn.onclick = () => { try { window.close() } catch {} }
-      cardEl.appendChild(btn)
+    // state からアプリのオリジンを取り出す
+    // 新フォーマット: verifier~encodedOrigin~...  旧: verifier.encodedOrigin
+    let appOrigin = window.location.origin
+    try {
+      if (stateVal.includes('~')) {
+        const p = stateVal.split('~')
+        if (p[1]) appOrigin = decodeURIComponent(p[1])
+      } else {
+        const dot = stateVal.indexOf('.')
+        if (dot !== -1) appOrigin = decodeURIComponent(stateVal.slice(dot + 1))
+      }
+    } catch {}
 
-      // opener にフォーカスを戻す
-      try { if (window.opener) window.opener.focus() } catch {}
-      // 自動クローズを試みる（環境によって動作しないことがある）
-      try { window.close() } catch {}
-    }
-
-    function showError(text) {
+    if (!search || (!code && !error)) {
+      iconEl.textContent  = '❌'
+      titleEl.textContent = 'エラー'
+      subEl.textContent   = 'パラメータがありません。アプリから認証を開始してください。'
+    } else if (error) {
+      iconEl.textContent  = '❌'
       titleEl.textContent = '認証エラー'
       titleEl.classList.add('error')
-      msgEl.textContent = text
-      cardEl.querySelector('.icon').textContent = '❌'
-    }
+      subEl.textContent   = error
+    } else if (code && stateVal) {
 
-    function showFallback(appOrigin, search) {
-      // postMessage が使えない場合はリダイレクト
-      window.location.replace(appOrigin + search)
-    }
+      if (window.opener) {
+        // ── ポップアップフロー（Electron / Even Hub 内部 WebView）
+        try {
+          window.opener.postMessage({ spotifyCode: code, spotifyState: stateVal }, '*')
 
-    const search = window.location.search
-    if (!search) {
-      showError('パラメータがありません。アプリから認証を開始してください。')
-    } else {
-      const usp      = new URLSearchParams(search)
-      const code     = usp.get('code')
-      const error    = usp.get('error')
-      const stateVal = usp.get('state') ?? ''
+          iconEl.textContent  = '✅'
+          titleEl.textContent = '認証完了！'
+          subEl.textContent   = 'アプリに戻っています...'
 
-      // state からアプリのオリジンを取り出す
-      // 新フォーマット: verifier~encodedOrigin~encodedClientId~encodedRedirectUri
-      // 旧フォーマット: verifier.encodedOrigin
-      let appOrigin = window.location.origin
-      try {
-        if (stateVal.includes('~')) {
-          const parts = stateVal.split('~')
-          if (parts[1]) appOrigin = decodeURIComponent(parts[1])
-        } else {
-          const dot = stateVal.indexOf('.')
-          if (dot !== -1) appOrigin = decodeURIComponent(stateVal.slice(dot + 1))
+          // postMessage の処理完了を待ってからアプリに戻る
+          // window.close() はモバイルでは動作しないため、アプリのオリジンへナビゲート
+          setTimeout(() => {
+            try {
+              window.location.replace(appOrigin)
+            } catch {
+              // ナビゲートできない場合は手動案内を表示
+              subEl.textContent    = '自動で戻れませんでした。'
+              hintEl.style.display = ''
+              hintEl.innerHTML     =
+                '<strong>Android:</strong> 画面左上の「 ← 」をタップ<br>' +
+                '<strong>iOS:</strong> 画面左上の「完了」をタップ<br>してアプリに戻ってください。'
+            }
+          }, 800)
+
+        } catch {
+          // postMessage 失敗 → リダイレクトにフォールバック
+          window.location.replace(appOrigin + search)
         }
-      } catch {}
 
-      if (error) {
-        showError('Spotify 認証エラー: ' + error)
-      } else if (code && stateVal) {
-        // ── 方法1: postMessage（ポップアップフロー / Electron 内部 WebView）
-        if (window.opener) {
-          try {
-            window.opener.postMessage({ spotifyCode: code, spotifyState: stateVal }, '*')
-            showSuccess()
-          } catch {
-            showFallback(appOrigin, search)
-          }
-        } else {
-          // ── 方法2: リダイレクト（フォールバック）
-          showFallback(appOrigin, search)
-        }
       } else {
-        showError('コードが見つかりません。アプリから認証を開始してください。')
+        // ── リダイレクトフォールバック（opener なし）
+        window.location.replace(appOrigin + search)
       }
+
     }
   </script>
 </body>
