@@ -13,19 +13,56 @@
 <body>
   <p id="msg">Spotify 認証中...</p>
   <script>
-    // ────────────────────────────────────────────────
-    // デプロイ前にここだけ書き換える:
-    // Even G2 Spotify アプリが動いている URL（末尾スラッシュなし）
-    // ────────────────────────────────────────────────
-    const APP_URL = 'http://localhost:5173'
-    // ────────────────────────────────────────────────
+    const search = window.location.search  // ?code=...&state=...
 
-    const params = window.location.search   // ?code=... または ?error=...
-
-    if (!params) {
+    if (!search) {
       document.getElementById('msg').textContent = 'パラメータがありません。アプリから認証を開始してください。'
     } else {
-      window.location.replace(APP_URL + params)
+      const usp = new URLSearchParams(search)
+      const code  = usp.get('code')
+      const error = usp.get('error')
+      const stateVal = usp.get('state') ?? ''
+
+      // state からアプリのオリジンを取り出す。
+      // 新フォーマット: "verifier~encodedOrigin~encodedClientId~encodedRedirectUri"
+      // 旧フォーマット: "verifier.encodedOrigin"
+      let appOrigin = window.location.origin  // フォールバック
+      try {
+        if (stateVal.includes('~')) {
+          const parts = stateVal.split('~')
+          if (parts[1]) appOrigin = decodeURIComponent(parts[1])
+        } else {
+          const dot = stateVal.indexOf('.')
+          if (dot !== -1) appOrigin = decodeURIComponent(stateVal.slice(dot + 1))
+        }
+      } catch { /* stateが不正な場合はフォールバックを使用 */ }
+
+      if (error) {
+        document.getElementById('msg').textContent = '認証エラー: ' + error
+      } else if (code && stateVal) {
+        // ── 方法1: postMessage（ポップアップフロー / Electron 内部 WebView）──
+        // Even Hub は window.open() を内部 BrowserWindow で処理するため
+        // window.opener が有効 → メッセージ送信でページ遷移不要
+        let handled = false
+        if (window.opener) {
+          try {
+            window.opener.postMessage(
+              { spotifyCode: code, spotifyState: stateVal },
+              '*'
+            )
+            document.getElementById('msg').textContent = '認証完了！アプリに戻ってください。'
+            setTimeout(() => { try { window.close() } catch {} }, 2000)
+            handled = true
+          } catch { /* fall through to redirect */ }
+        }
+
+        // ── 方法2: リダイレクト（フォールバック / dev サーバーなど）──
+        if (!handled) {
+          window.location.replace(appOrigin + search)
+        }
+      } else {
+        document.getElementById('msg').textContent = 'コードが見つかりません。アプリから認証を開始してください。'
+      }
     }
   </script>
 </body>
