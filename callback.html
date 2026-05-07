@@ -14,12 +14,7 @@
     .card { text-align: center; padding: 40px 28px; max-width: 400px; width: 90%; }
     .icon { font-size: 3.5rem; margin-bottom: 20px; }
     h1 { font-size: 1.4rem; margin-bottom: 12px; }
-    .sub { font-size: 0.88rem; opacity: 0.6; line-height: 1.7; margin-bottom: 28px; }
-    .hint {
-      font-size: 0.82rem; background: #1e1e1e; border-radius: 8px;
-      padding: 12px 16px; line-height: 1.8; opacity: 0.75; margin-bottom: 20px;
-    }
-    .hint strong { opacity: 1; color: #1db954; }
+    .sub { font-size: 0.88rem; opacity: 0.6; line-height: 1.7; }
     .error { color: #ff6b6b; }
   </style>
 </head>
@@ -27,80 +22,127 @@
   <div class="card">
     <div class="icon" id="icon">⏳</div>
     <h1 id="title">Spotify 認証中...</h1>
-    <p class="sub" id="sub"></p>
-    <div class="hint" id="hint" style="display:none"></div>
+    <p class="sub" id="sub">トークンを取得しています...</p>
   </div>
-
   <script>
     const iconEl  = document.getElementById('icon')
     const titleEl = document.getElementById('title')
     const subEl   = document.getElementById('sub')
-    const hintEl  = document.getElementById('hint')
 
-    const search   = window.location.search
-    const usp      = new URLSearchParams(search)
+    function showError(msg) {
+      iconEl.textContent  = '❌'
+      titleEl.textContent = '認証エラー'
+      titleEl.classList.add('error')
+      subEl.textContent   = msg
+    }
+
+    const usp      = new URLSearchParams(window.location.search)
     const code     = usp.get('code')
     const error    = usp.get('error')
     const stateVal = usp.get('state') ?? ''
 
-    // state からアプリのオリジンを取り出す
-    // 新フォーマット: verifier~encodedOrigin~...  旧: verifier.encodedOrigin
-    let appOrigin = window.location.origin
+    // state パース
+    // 新フォーマット: verifier~encodedOrigin~encodedClientId~encodedRedirectUri
+    // 旧フォーマット: verifier.encodedOrigin
+    let appOrigin   = window.location.origin
+    let verifier    = ''
+    let clientId    = ''
+    let redirectUri = window.location.href.split('?')[0]
     try {
       if (stateVal.includes('~')) {
         const p = stateVal.split('~')
-        if (p[1]) appOrigin = decodeURIComponent(p[1])
+        verifier    = p[0] ?? ''
+        if (p[1]) appOrigin   = decodeURIComponent(p[1])
+        if (p[2]) clientId    = decodeURIComponent(p[2])
+        if (p[3]) redirectUri = decodeURIComponent(p[3])
       } else {
         const dot = stateVal.indexOf('.')
+        verifier = dot !== -1 ? stateVal.slice(0, dot) : stateVal
         if (dot !== -1) appOrigin = decodeURIComponent(stateVal.slice(dot + 1))
       }
     } catch {}
 
-    if (!search || (!code && !error)) {
-      iconEl.textContent  = '❌'
-      titleEl.textContent = 'エラー'
-      subEl.textContent   = 'パラメータがありません。アプリから認証を開始してください。'
+    if (!code && !error) {
+      showError('パラメータがありません。アプリから認証を開始してください。')
     } else if (error) {
-      iconEl.textContent  = '❌'
-      titleEl.textContent = '認証エラー'
-      titleEl.classList.add('error')
-      subEl.textContent   = error
-    } else if (code && stateVal) {
-
-      if (window.opener) {
-        // ── ポップアップフロー（Electron / Even Hub 内部 WebView）
+      showError('Spotify 認証エラー: ' + error)
+    } else {
+      ;(async () => {
+        if (!verifier || !clientId) {
+          showError('認証情報が不完全です。アプリから再度お試しください。')
+          return
+        }
         try {
-          window.opener.postMessage({ spotifyCode: code, spotifyState: stateVal }, '*')
+          const res = await fetch('https://accounts.spotify.com/api/token', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+              grant_type:    'authorization_code',
+              code,
+              redirect_uri:  redirectUri,
+              client_id:     clientId,
+              code_verifier: verifier,
+            }),
+          })
+          if (!res.ok) throw new Error('HTTP ' + res.status)
+          const data = await res.json()
+
+          const tokens = {
+            accessToken:  data.access_token,
+            refreshToken: data.refresh_token,
+            expiresAt:    Date.now() + data.expires_in * 1000,
+            clientId,
+          }
+          const tokensJson = JSON.stringify(tokens)
 
           iconEl.textContent  = '✅'
           titleEl.textContent = '認証完了！'
           subEl.textContent   = 'アプリに戻っています...'
 
-          // postMessage の処理完了を待ってからアプリに戻る
-          // window.close() はモバイルでは動作しないため、アプリのオリジンへナビゲート
-          setTimeout(() => {
+          // ── 方法1: flutter_inappwebview bridge でネイティブストレージに書き込む ──
+          // Even Hub bridge が popup WebView でも登録されていれば、
+          // メイン WebView の bridge.getLocalStorage で読み出せる
+          if (window.flutter_inappwebview) {
             try {
-              window.location.replace(appOrigin)
+              await window.flutter_inappwebview.callHandler(
+                'evenAppMessage',
+                JSON.stringify({
+                  type:   'call_even_app_method',
+                  method: 'setLocalStorage',
+                  params: { key: 'spotify_oauth_tokens', value: tokensJson },
+                })
+              )
+            } catch {}
+          }
+
+          // ── 方法2: postMessage でメイン WebView に直接送信 ──
+          // flutter_inappwebview は postMessage データを JSON 文字列にシリアライズする場合がある
+          // メイン WebView 側では文字列・オブジェクト両方を受け入れる
+          if (window.opener) {
+            try {
+              // オブジェクト形式（通常のブラウザ向け）
+              window.opener.postMessage({ spotifyTokens: tokens }, '*')
+              // 文字列形式（flutter_inappwebview 向けの冗長送信）
+              window.opener.postMessage(tokensJson, '*')
+            } catch {}
+          }
+
+          // ── 方法3: appOrigin + hash にナビゲート ──
+          // Even Hub がこのナビゲーションを検出してポップアップを閉じるか、
+          // アプリが hash からトークンを読み出す
+          setTimeout(() => {
+            const hash = '#spotify_tokens=' + encodeURIComponent(tokensJson)
+            try {
+              window.location.replace(appOrigin + hash)
             } catch {
-              // ナビゲートできない場合は手動案内を表示
-              subEl.textContent    = '自動で戻れませんでした。'
-              hintEl.style.display = ''
-              hintEl.innerHTML     =
-                '<strong>Android:</strong> 画面左上の「 ← 」をタップ<br>' +
-                '<strong>iOS:</strong> 画面左上の「完了」をタップ<br>してアプリに戻ってください。'
+              subEl.textContent = 'アプリに手動で戻ってください。'
             }
-          }, 800)
+          }, 300)
 
-        } catch {
-          // postMessage 失敗 → リダイレクトにフォールバック
-          window.location.replace(appOrigin + search)
+        } catch (err) {
+          showError('トークン取得に失敗しました: ' + (err?.message ?? String(err)))
         }
-
-      } else {
-        // ── リダイレクトフォールバック（opener なし）
-        window.location.replace(appOrigin + search)
-      }
-
+      })()
     }
   </script>
 </body>
